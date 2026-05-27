@@ -77,9 +77,11 @@ export default function App() {
 const styles: Record<string, CSSProperties> = {
   page: {
     fontFamily: "system-ui, -apple-system, sans-serif",
-    maxWidth: 760,
-    margin: "0 auto",
-    padding: 24,
+    // No maxWidth: the header, todo list, and notifications fill the
+    // viewport. `clamp` scales horizontal padding from 16px on phones
+    // to 48px on wide monitors so content doesn't hug the edges on
+    // either extreme.
+    padding: "24px clamp(16px, 4vw, 48px)",
   },
   header: {
     display: "flex",
