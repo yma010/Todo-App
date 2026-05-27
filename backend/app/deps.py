@@ -11,18 +11,23 @@ from .security import lookup_session
 _settings = get_settings()
 
 
-def _clear_session_cookie(response: Response) -> None:
-    response.delete_cookie(
+def _cookie_clear_headers() -> dict[str, str]:
+    # We can't mutate the injected Response and then `raise HTTPException` —
+    # FastAPI's exception handler builds a fresh response and drops those
+    # mutations. Instead, build the Set-Cookie deletion header here and
+    # attach it to the HTTPException so it survives.
+    tmp = Response()
+    tmp.delete_cookie(
         key=_settings.SESSION_COOKIE_NAME,
         path="/",
         httponly=True,
         secure=_settings.COOKIE_SECURE,
         samesite="lax",
     )
+    return {"set-cookie": tmp.headers["set-cookie"]}
 
 
 def get_current_user(
-    response: Response,
     db: DbSession = Depends(get_db),
     session_cookie: str | None = Cookie(default=None, alias=_settings.SESSION_COOKIE_NAME),
 ) -> User:
@@ -31,16 +36,25 @@ def get_current_user(
     try:
         session_id = UUID(session_cookie)
     except ValueError:
-        _clear_session_cookie(response)
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid session")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid session",
+            headers=_cookie_clear_headers(),
+        )
 
     session = lookup_session(db, session_id)
     if session is None:
-        _clear_session_cookie(response)
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="session expired")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="session expired",
+            headers=_cookie_clear_headers(),
+        )
 
     user = db.get(User, session.user_id)
     if user is None:
-        _clear_session_cookie(response)
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="user missing")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="user missing",
+            headers=_cookie_clear_headers(),
+        )
     return user

@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 export PATH := $(HOME)/.local/bin:$(PATH)
 
-.PHONY: help db db-down api web test migrate revision install
+.PHONY: help db db-down api api-lan web test migrate revision install
 
 help:
 	@echo "Targets:"
@@ -10,7 +10,8 @@ help:
 	@echo "  make install   - install backend + frontend deps"
 	@echo "  make migrate   - alembic upgrade head"
 	@echo "  make revision m=\"msg\"  - alembic autogenerate revision"
-	@echo "  make api       - run FastAPI (uvicorn) on :8000"
+	@echo "  make api       - run FastAPI (uvicorn) on 127.0.0.1:8000"
+	@echo "  make api-lan   - run FastAPI on 0.0.0.0:8000 (LAN-accessible; use only on trusted networks)"
 	@echo "  make web       - run Vite dev server on :5173"
 	@echo "  make test      - run backend pytest suite"
 
@@ -31,6 +32,9 @@ revision:
 	cd backend && uv run alembic revision --autogenerate -m "$(m)"
 
 api:
+	cd backend && uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+
+api-lan:
 	cd backend && uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 web:

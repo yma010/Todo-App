@@ -1,5 +1,7 @@
 # Todo App with Due-Date Reminders
 
+[![CI](https://github.com/yma010/Todo-App/actions/workflows/ci.yml/badge.svg)](https://github.com/yma010/Todo-App/actions/workflows/ci.yml)
+
 A small but production-minded full-stack todo app:
 
 - **Backend:** FastAPI (Python 3.12) + SQLAlchemy 2 + Alembic
@@ -8,9 +10,11 @@ A small but production-minded full-stack todo app:
 - **Frontend:** React 18 + Vite + TypeScript
 - **Auth:** server-side sessions in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie
 
-See `PRD.md` for product requirements, `Implementation_Plan.md` for the
-phased build plan, and `README_notes.md` for the long-form architecture
-decisions this section summarizes.
+See [`docs/Interview_exercise.md`](docs/Interview_exercise.md) for the
+exercise brief, [`docs/PRD.md`](docs/PRD.md) for the product requirements,
+[`docs/Implementation_Plan.md`](docs/Implementation_Plan.md) for the
+phased build plan, and [`docs/README_notes.md`](docs/README_notes.md) for
+the long-form architecture decisions this section summarizes.
 
 ---
 
@@ -54,32 +58,40 @@ make test
 ```
 
 Tests live in `backend/tests/` and require Postgres to be up (`make db`).
-The suite covers the two critical paths called out in the PRD: cross-user
+The suite covers the two critical paths called out in the PRD — cross-user
 data isolation and the reminder scheduling lifecycle (schedule, reschedule,
-cancel on delete/complete/clear, idempotent fire).
+cancel on delete/complete/clear, idempotent fire) — plus the defense-in-depth
+layers added on top (cookie clearing on 401, Origin enforcement on mutating
+routes, per-IP throttle + log emission, security headers, prod fail-closed
+validator, and docs-route gating). 43 tests across five files; see the
+repository layout below for what each file covers.
 
 ## Repository layout
 
 ```
 backend/
   app/
-    main.py            FastAPI app + lifespan (scheduler start/stop)
-    config.py          Pydantic Settings (env-driven)
+    main.py            FastAPI app + lifespan; origin-check + security-headers middleware
+    config.py          Pydantic Settings (env-driven) + validate_for_env()
     db.py              SQLAlchemy engine + session factory
     models.py          User, Session, Todo, Notification
     schemas.py         Pydantic request/response models
     security.py        bcrypt + session create/lookup/revoke
     deps.py            get_current_user dependency
+    rate_limit.py      in-process sliding-window limiter
     scheduler.py       APScheduler init + fire_reminder job
     routers/
-      auth.py          /api/auth/{register,login,logout,me}
+      auth.py          /api/auth/{register,login,logout,me} + per-IP throttle + WARN logs
       todos.py         /api/todos CRUD
       notifications.py /api/notifications + mark-read
   alembic/             schema migrations
   tests/
     conftest.py
-    test_auth_isolation.py
-    test_reminders.py
+    test_auth_isolation.py    session lifecycle, isolation, password rules, cookie clearing
+    test_csrf.py              Origin-header enforcement on mutating routes
+    test_rate_limit.py        throttle behavior + log emission
+    test_reminders.py         scheduler lifecycle + idempotency
+    test_security_headers.py  prod fail-closed validator + headers + docs gating
 frontend/
   src/
     api.ts             fetch wrapper (credentials: include)
@@ -202,6 +214,65 @@ explicit "log in vs. register" UX makes that signal an accepted
 trade-off for this exercise; the production answer is a generic
 "check your email for next steps" flow.)
 
+### Security hardening (defense in depth)
+
+These layers sit on top of the auth/session design above. Each defends
+against a separate failure mode — the goal is that no single
+misconfiguration breaks the whole story.
+
+- **Cookie clearing on logout and 401.** `logout` and `get_current_user`
+  return a `Set-Cookie` deletion header on the actual response (not a
+  mutated injected `Response` that FastAPI's exception handler would
+  silently drop). So `revoke_session` + the cleared cookie together
+  mean the browser stops sending a dead credential immediately.
+- **Origin check on state-changing routes.** A middleware in `main.py`
+  rejects any `POST/PUT/PATCH/DELETE` whose `Origin` header is present
+  and doesn't match `FRONTEND_ORIGIN` (including `Origin: null` from
+  sandboxed iframes). Missing `Origin` is allowed so curl / TestClient
+  / server-to-server still work; `SameSite=Lax` covers the browser CSRF
+  case. This is defense in depth — if the cookie's `SameSite` is ever
+  relaxed (e.g. for a future subdomain), the API doesn't silently open.
+- **Per-IP auth throttle + structured failure logs.** A small
+  sliding-window limiter (`app/rate_limit.py`, single worker only)
+  caps `/auth/login` at 10/min and `/auth/register` at 5/10min per
+  client IP, returning `429` with `Retry-After`. Failed logins, register
+  conflicts, and throttle hits all log at WARN via the `todo.auth`
+  logger. Emails are logged as a 16-char SHA-256 fingerprint
+  (`email_fp=…`), never plaintext — so log volume tells you about
+  attacks without disclosing accounts.
+- **Baseline security response headers.** Every response carries
+  `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and
+  `Strict-Transport-Security: max-age=63072000; includeSubDomains`.
+  Every `/api/*` response also carries `Cache-Control: no-store` so
+  user-private data can't sit in shared/intermediary caches.
+- **Prod fail-closed config.** `Settings.validate_for_env()` runs in
+  the FastAPI `lifespan`. When `ENV=prod`, the app refuses to start
+  unless `COOKIE_SECURE=true` and `FRONTEND_ORIGIN` starts with
+  `https://`. All problems surface in a single error so a misconfigured
+  deploy doesn't require multiple re-deploy cycles to find them.
+- **Auto-docs gated to dev.** `/docs`, `/redoc`, and `/openapi.json`
+  are reachable in dev for ergonomics, and disabled (404) when
+  `ENV=prod` so the API surface map isn't free reconnaissance.
+- **Bound to localhost by default.** `docker-compose` publishes
+  Postgres on `127.0.0.1:5432` (not LAN-wide); `make api` binds
+  uvicorn to `127.0.0.1`. An explicit `make api-lan` target opts in to
+  `0.0.0.0` for testing from another device on a trusted network.
+
+New env vars introduced by these layers (all have safe defaults in
+`backend/.env.example`):
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `ENV` | `dev` | Set to `prod` to trigger the fail-closed validation and disable auto-docs. |
+| `AUTH_LOGIN_MAX_PER_MIN` | `10` | Per-IP cap on `/api/auth/login`. |
+| `AUTH_REGISTER_MAX_PER_10MIN` | `5` | Per-IP cap on `/api/auth/register`. |
+
+The two layers we knowingly didn't add: per-account login throttle
+(would let an attacker DoS a single user by spamming failed
+attempts — needs a lockout-vs-DoS product decision) and a "revoke all
+other sessions" endpoint (needs UI work). Both are on the "would do
+next" list.
+
 ---
 
 ## Architecture decision: APScheduler vs Celery
@@ -270,6 +341,7 @@ separate token; logout invalidates the row so revocation is immediate.*
 - **AI suggested firing the reminder synchronously inside the request as a "demo shortcut."** Rejected — that defeats the point of the background-job exercise; the brief is explicit that async patterns are one of the things being tested.
 - **AI's initial password validation was `min_length=12` only.** I noticed that this lets sequential-digit strings like `123456789101112` through, which is exactly the class of password the rule was meant to catch. First tried zxcvbn with score ≥ 3; the per-rule feedback ("This is similar to a commonly used password") was both wordy and a calibration signal for attackers. Settled on deterministic character-class rules (length, digit, symbol) with a single fixed error message that doubles as the construction hint — predictable for users, no per-rule disclosure to attackers.
 - **AI ordered the register endpoint with password validation before the email-uniqueness check.** This meant a user retrying with an already-registered email kept getting password errors instead of "this email is registered." Swapped the order: email-exists fires first as 409, password validation second as 422, then insert.
+- **AI's original logout / 401 code mutated FastAPI's injected `Response` and then either returned a fresh `Response()` or raised `HTTPException`.** The cookie-clearing `Set-Cookie` header was silently dropped in both cases — server-side revocation worked, but the browser kept re-sending a dead cookie until natural expiry. The "logout immediately invalidates the credential" claim in the architecture section was only half-true. Fixed by building the response object explicitly in `logout` and by attaching the deletion header via `HTTPException(headers=...)` in `get_current_user`. Two new tests now assert the `Set-Cookie` header is present and well-formed on the actual response.
 
 ---
 
@@ -283,6 +355,9 @@ Mapped to the PRD's "could have" list and the gaps above:
 - Switch background work to Celery + Redis with `acks_late=True` for at-least-once delivery and automatic retry on mid-execution crashes
 - Server-sent events instead of polling for the notifications list
 - A small Playwright happy-path E2E to complement the API tests
+- Per-account login throttle (in addition to the per-IP cap) — needs a deliberate lockout-vs-DoS product decision before shipping
+- A `/auth/sessions` listing endpoint + "sign out of all other devices" UI, backed by the existing `sessions.revoked_at` column
+- Swap the in-process rate limiter for a Redis-backed one when the deployment moves past a single worker
 
 ---
 

@@ -63,9 +63,13 @@ def _ensure_test_database() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _truncate_between_tests() -> Iterator[None]:
-    """Wipe rows between tests so each test starts clean."""
+    """Wipe rows AND clear the in-process auth rate-limiter so each test
+    starts clean (otherwise a chatty test can poison its neighbor with 429s)."""
     from app import db as app_db
+    from app.routers.auth import reset_auth_limiters
+    reset_auth_limiters()
     yield
+    reset_auth_limiters()
     with app_db.engine.begin() as c:
         c.execute(
             text(

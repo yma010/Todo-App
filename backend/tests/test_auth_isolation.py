@@ -22,13 +22,48 @@ def test_register_login_me_logout_revokes_session(client: TestClient) -> None:
     assert me.status_code == 200
     assert me.json()["email"] == "alice@example.com"
 
-    # Logout invalidates the session row server-side.
+    # Logout invalidates the session row server-side AND clears the
+    # client cookie via Set-Cookie: …; Max-Age=0.
+    out = client.post("/api/auth/logout")
+    assert out.status_code == 204
+    set_cookie = out.headers.get("set-cookie", "")
+    assert "todo_session=" in set_cookie
+    assert "Max-Age=0" in set_cookie
+    assert "todo_session" not in client.cookies
+
+    # Even if the cookie somehow lingered, the server-side revocation
+    # means /me is 401.
+    after = client.get("/api/auth/me")
+    assert after.status_code == 401
+
+
+def test_request_with_malformed_session_cookie_clears_it(client: TestClient) -> None:
+    """A non-UUID session cookie must be cleared by the server's 401 so
+    a real browser stops re-sending a doomed credential."""
+    # Use httpx's explicit-cookie kwarg so it isn't stored in the client jar
+    # (avoids domain-matching quirks of TestClient.cookies.set on the assertion).
+    r = client.get("/api/auth/me", cookies={"todo_session": "not-a-uuid"})
+    assert r.status_code == 401
+    set_cookie = r.headers.get("set-cookie", "")
+    assert "todo_session=" in set_cookie
+    assert "Max-Age=0" in set_cookie
+
+
+def test_request_with_revoked_session_cookie_clears_it(client: TestClient) -> None:
+    """If a client somehow re-sends a revoked cookie, the 401 carries
+    a Set-Cookie deletion header so the browser drops it."""
+    _register(client, "stale@example.com")
+    stale_cookie = client.cookies.get("todo_session")
+    assert stale_cookie is not None
+
     out = client.post("/api/auth/logout")
     assert out.status_code == 204
 
-    # Same client (same cookie jar). The cookie was cleared, so /me is 401.
-    after = client.get("/api/auth/me")
-    assert after.status_code == 401
+    r = client.get("/api/auth/me", cookies={"todo_session": stale_cookie})
+    assert r.status_code == 401
+    set_cookie = r.headers.get("set-cookie", "")
+    assert "todo_session=" in set_cookie
+    assert "Max-Age=0" in set_cookie
 
 
 def test_unauthenticated_requests_are_401(client: TestClient) -> None:
