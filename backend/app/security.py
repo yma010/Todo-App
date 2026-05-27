@@ -11,7 +11,8 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from passlib.context import CryptContext
-from sqlalchemy.orm import Session as DbSession
+from sqlalchemy import select
+from sqlalchemy.orm import Session as DbSession, joinedload
 
 from .config import get_settings
 from .models import Session as SessionRow
@@ -31,6 +32,11 @@ PASSWORD_REQUIREMENTS_MSG = (
 
 _DIGIT_RE = re.compile(r"\d")
 _SYMBOL_RE = re.compile(r"[^A-Za-z0-9]")
+
+# `last_used_at` is audit metadata — minute-level granularity is plenty.
+# Writing it on every authenticated request turned every read into a
+# write + COMMIT, capping how far the API can scale.
+SESSION_TOUCH_INTERVAL = timedelta(seconds=60)
 
 
 class InvalidPasswordError(ValueError):
@@ -80,16 +86,27 @@ def create_session(db: DbSession, user_id: UUID) -> SessionRow:
 
 
 def lookup_session(db: DbSession, session_id: UUID) -> SessionRow | None:
-    """Return the session row only if active. Touches last_used_at."""
-    row = db.get(SessionRow, session_id)
+    """Return the session row only if active, with `.user` eagerly loaded.
+
+    Folds the user fetch into the session query (joinedload) so `get_current_user`
+    doesn't need a second round-trip. Throttles the `last_used_at` write to
+    SESSION_TOUCH_INTERVAL so most authenticated requests are pure reads.
+    """
+    row = db.execute(
+        select(SessionRow)
+        .options(joinedload(SessionRow.user))
+        .where(SessionRow.id == session_id)
+    ).scalar_one_or_none()
     if row is None:
         return None
     if row.revoked_at is not None:
         return None
-    if row.expires_at <= _utcnow():
+    now = _utcnow()
+    if row.expires_at <= now:
         return None
-    row.last_used_at = _utcnow()
-    db.commit()
+    if now - row.last_used_at >= SESSION_TOUCH_INTERVAL:
+        row.last_used_at = now
+        db.commit()
     return row
 
 

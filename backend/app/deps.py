@@ -50,7 +50,8 @@ def get_current_user(
             headers=_cookie_clear_headers(),
         )
 
-    user = db.get(User, session.user_id)
+    # `session.user` is eager-loaded by lookup_session — no extra round-trip.
+    user = session.user
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
