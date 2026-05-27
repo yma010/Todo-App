@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, type Todo } from "../api";
 import { qk } from "../queryClient";
@@ -16,9 +16,7 @@ export function TodoItem({ todo }: { todo: Todo }) {
   const queryClient = useQueryClient();
 
   // Optimistic toggle: write the cache immediately, roll back on error,
-  // re-fetch on settle so the server's truth wins regardless. This is the
-  // canonical React Query pattern for "instant feedback on a network
-  // round-trip" — onMutate fires synchronously before the request leaves.
+  // re-fetch on settle so the server's truth wins regardless.
   const toggleComplete = useMutation({
     mutationFn: (completed: boolean) =>
       api.patch<Todo>(`/todos/${todo.id}`, { completed }),
@@ -63,14 +61,19 @@ export function TodoItem({ todo }: { todo: Todo }) {
   }
 
   function handleRemove() {
-    if (!confirm(`Delete "${todo.title}"?`)) return;
+    // Curly quotes around the title — interview-grade typography.
+    if (!confirm(`Delete “${todo.title}”?`)) return;
     remove.mutate();
   }
 
   const busy = toggleComplete.isPending || saveEdit.isPending || remove.isPending;
-  const error =
-    toggleComplete.error ?? saveEdit.error ?? remove.error ?? null;
-  const errorMsg = error instanceof ApiError ? error.message : error ? "update failed" : null;
+  const error = toggleComplete.error ?? saveEdit.error ?? remove.error ?? null;
+  const errorMsg =
+    error instanceof ApiError ? error.message : error ? "Update failed." : null;
+
+  const toggleLabel = todo.completed
+    ? `Mark "${todo.title}" as incomplete`
+    : `Mark "${todo.title}" as complete`;
 
   return (
     <li style={{ ...styles.row, opacity: todo.completed ? 0.55 : 1 }}>
@@ -78,37 +81,66 @@ export function TodoItem({ todo }: { todo: Todo }) {
         type="checkbox"
         checked={todo.completed}
         onChange={(e) => toggleComplete.mutate(e.target.checked)}
-        aria-label="complete"
+        aria-label={toggleLabel}
       />
       {editing ? (
         <div style={styles.editArea}>
-          <input value={title} onChange={(e) => setTitle(e.target.value)} style={styles.input} />
+          <input
+            name="title"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            aria-label="Title"
+            style={{ ...styles.input, flex: "1 1 200px" }}
+          />
           <input
             type="datetime-local"
+            name="due_at"
             value={dueAt}
             onChange={(e) => setDueAt(e.target.value)}
+            aria-label="Due date"
             style={styles.input}
           />
-          <button onClick={handleSaveEdit} disabled={saveEdit.isPending}>Save</button>
-          <button onClick={() => setEditing(false)} disabled={saveEdit.isPending}>Cancel</button>
+          <button onClick={handleSaveEdit} disabled={saveEdit.isPending} style={styles.btn}>
+            {saveEdit.isPending ? "Saving…" : "Save"}
+          </button>
+          <button
+            onClick={() => setEditing(false)}
+            disabled={saveEdit.isPending}
+            style={styles.btn}
+          >
+            Cancel
+          </button>
         </div>
       ) : (
         <div style={styles.viewArea}>
-          <div style={{ textDecoration: todo.completed ? "line-through" : "none" }}>
+          <div
+            style={{
+              textDecoration: todo.completed ? "line-through" : "none",
+              overflowWrap: "anywhere",
+            }}
+          >
             {todo.title}
           </div>
           {todo.due_at && (
-            <div style={{ fontSize: 12, color: "#666" }}>due {formatDue(todo.due_at)}</div>
+            <div style={{ fontSize: 12, color: "#6b7280" }}>
+              due {formatDue(todo.due_at)}
+            </div>
           )}
         </div>
       )}
       {!editing && (
         <div style={{ display: "flex", gap: 6 }}>
-          <button onClick={() => setEditing(true)} disabled={busy}>Edit</button>
-          <button onClick={handleRemove} disabled={busy}>Delete</button>
+          <button onClick={() => setEditing(true)} disabled={busy} style={styles.btn}>
+            Edit
+          </button>
+          <button onClick={handleRemove} disabled={busy} style={styles.btn}>
+            Delete
+          </button>
         </div>
       )}
-      {errorMsg && <div style={{ color: "#c00", width: "100%" }}>{errorMsg}</div>}
+      <div aria-live="polite" style={{ width: "100%" }}>
+        {errorMsg && <div style={styles.error}>{errorMsg}</div>}
+      </div>
     </li>
   );
 }
@@ -124,16 +156,25 @@ function formatDue(iso: string): string {
   return new Date(iso).toLocaleString();
 }
 
-const styles: Record<string, React.CSSProperties> = {
+const styles: Record<string, CSSProperties> = {
   row: {
     display: "flex",
     alignItems: "center",
     gap: 10,
     padding: "10px 12px",
-    borderBottom: "1px solid #eee",
+    borderBottom: "1px solid #e5e7eb",
     flexWrap: "wrap",
+    minWidth: 0,
   },
-  viewArea: { flex: 1, display: "flex", flexDirection: "column", gap: 2 },
-  editArea: { flex: 1, display: "flex", gap: 6, flexWrap: "wrap" },
-  input: { padding: 6, fontSize: 14 },
+  viewArea: { flex: 1, display: "flex", flexDirection: "column", gap: 2, minWidth: 0 },
+  editArea: { flex: 1, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" },
+  input: { padding: 6, fontSize: 14, border: "1px solid #d1d5db", borderRadius: 4 },
+  btn: {
+    padding: "5px 10px",
+    fontSize: 13,
+    border: "1px solid #d1d5db",
+    background: "white",
+    borderRadius: 6,
+  },
+  error: { color: "#b91c1c", marginTop: 8, fontSize: 13 },
 };

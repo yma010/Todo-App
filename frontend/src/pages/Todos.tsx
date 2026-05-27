@@ -10,35 +10,43 @@ export function Todos() {
     queryFn: () => api.get<Todo[]>("/todos"),
   });
 
-  if (isPending) return <p>Loading…</p>;
-  if (error) {
+  if (isPending) {
     return (
-      <p style={{ color: "#c00" }}>
-        {error instanceof ApiError ? error.message : "load failed"}
+      <p role="status" aria-live="polite">
+        Loading…
       </p>
     );
   }
 
+  const errorMsg =
+    error instanceof ApiError ? error.message : error ? "Failed to load todos." : null;
+
   return (
     <section>
-      <h2>Your todos</h2>
+      <h2 style={{ marginTop: 0 }}>Your Todos</h2>
       <TodoForm />
-      {todos.length === 0 ? (
-        <p style={{ color: "#666", marginTop: 12 }}>Nothing yet. Add one above.</p>
+      <div aria-live="polite">
+        {errorMsg && <p style={{ color: "#b91c1c", marginTop: 12 }}>{errorMsg}</p>}
+      </div>
+      {!errorMsg && todos.length === 0 ? (
+        <p style={{ color: "#6b7280", marginTop: 12 }}>Nothing yet. Add one above.</p>
       ) : (
-        <ul
-          style={{
-            listStyle: "none",
-            padding: 0,
-            marginTop: 16,
-            border: "1px solid #eee",
-            borderRadius: 6,
-          }}
-        >
-          {todos.map((t) => (
-            <TodoItem key={t.id} todo={t} />
-          ))}
-        </ul>
+        todos.length > 0 && (
+          <ul
+            className="long-list"
+            style={{
+              listStyle: "none",
+              padding: 0,
+              marginTop: 16,
+              border: "1px solid #e5e7eb",
+              borderRadius: 6,
+            }}
+          >
+            {todos.map((t) => (
+              <TodoItem key={t.id} todo={t} />
+            ))}
+          </ul>
+        )
       )}
     </section>
   );
