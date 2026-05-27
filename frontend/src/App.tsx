@@ -1,5 +1,5 @@
 import {
-  useEffect,
+  useCallback,
   useRef,
   useState,
   type CSSProperties,
@@ -21,25 +21,30 @@ function readTabFromUrl(): Tab {
   return v === "notif" ? "notif" : "todos";
 }
 
+// useState + URL sync, with the URL write folded into the setter rather
+// than an effect that watches state. Tab only changes from user events
+// (button click, arrow-key nav), so the setter is the right place to
+// update the URL — no need to subscribe to state changes via useEffect.
+function useTabState(): [Tab, (next: Tab) => void] {
+  const [tab, setTabState] = useState<Tab>(readTabFromUrl);
+  const setTab = useCallback((next: Tab) => {
+    setTabState(next);
+    const params = new URLSearchParams(window.location.search);
+    params.set("tab", next);
+    window.history.replaceState(null, "", `?${params.toString()}`);
+  }, []);
+  return [tab, setTab];
+}
+
 function Shell() {
   const { user, loading, logout } = useAuth();
-  const [tab, setTab] = useState<Tab>(readTabFromUrl);
+  const [tab, setTab] = useTabState();
   const { data: notifications } = useNotifications();
   const unread = notifications?.filter((n) => !n.read_at).length ?? 0;
   const tabRefs = useRef<Record<Tab, HTMLButtonElement | null>>({
     todos: null,
     notif: null,
   });
-
-  // Deep-link the tab choice. URL is source of truth for "which view"
-  // so refresh, browser back, and shared links all land correctly.
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("tab") !== tab) {
-      params.set("tab", tab);
-      window.history.replaceState(null, "", `?${params.toString()}`);
-    }
-  }, [tab]);
 
   if (loading) {
     return (
