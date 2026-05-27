@@ -1,6 +1,6 @@
 import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, ApiError, type User } from "../api";
+import { api, type User } from "../api";
 import { qk } from "../queryClient";
 
 type AuthState = {
@@ -25,9 +25,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     staleTime: 0,
   });
 
-  const user: User | null =
-    meQuery.data ??
-    (meQuery.error instanceof ApiError && meQuery.error.status === 401 ? null : null);
+  // The 401 handler in queryClient.ts calls setQueryData(qk.me, null)
+  // whenever any request returns 401 — so a fresh `null` here is the
+  // authoritative "logged out" signal, including for session-expiry
+  // mid-session. No need to inspect meQuery.error directly.
+  const user: User | null = meQuery.data ?? null;
 
   // `loading` is true only during the very first /me call so the UI can
   // show a spinner instead of flashing the login screen for a logged-in user.
