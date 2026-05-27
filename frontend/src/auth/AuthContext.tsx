@@ -1,5 +1,7 @@
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useContext, useMemo, type ReactNode } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, type User } from "../api";
+import { qk } from "../queryClient";
 
 type AuthState = {
   user: User | null;
@@ -12,40 +14,71 @@ type AuthState = {
 const AuthCtx = createContext<AuthState | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
 
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .get<User>("/auth/me")
-      .then((u) => !cancelled && setUser(u))
-      .catch((e) => {
-        if (!(e instanceof ApiError) || e.status !== 401) console.error(e);
-        if (!cancelled) setUser(null);
-      })
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // `me` is the source of truth for who's logged in. A 401 here means
+  // "not logged in" — handled cleanly by treating no-data as no-user.
+  const meQuery = useQuery({
+    queryKey: qk.me,
+    queryFn: () => api.get<User>("/auth/me"),
+    // Auth state can't go stale silently — we want focus refetch.
+    staleTime: 0,
+  });
 
-  const login = useCallback(async (email: string, password: string) => {
-    const u = await api.post<User>("/auth/login", { email, password });
-    setUser(u);
-  }, []);
+  const user: User | null =
+    meQuery.data ??
+    (meQuery.error instanceof ApiError && meQuery.error.status === 401 ? null : null);
 
-  const register = useCallback(async (email: string, password: string) => {
-    const u = await api.post<User>("/auth/register", { email, password });
-    setUser(u);
-  }, []);
+  // `loading` is true only during the very first /me call so the UI can
+  // show a spinner instead of flashing the login screen for a logged-in user.
+  const loading = meQuery.isPending;
 
-  const logout = useCallback(async () => {
-    await api.post("/auth/logout");
-    setUser(null);
-  }, []);
+  const loginMutation = useMutation({
+    mutationFn: ({ email, password }: { email: string; password: string }) =>
+      api.post<User>("/auth/login", { email, password }),
+    onSuccess: (u) => {
+      queryClient.setQueryData(qk.me, u);
+    },
+  });
 
-  return <AuthCtx.Provider value={{ user, loading, login, register, logout }}>{children}</AuthCtx.Provider>;
+  const registerMutation = useMutation({
+    mutationFn: ({ email, password }: { email: string; password: string }) =>
+      api.post<User>("/auth/register", { email, password }),
+    onSuccess: (u) => {
+      queryClient.setQueryData(qk.me, u);
+    },
+  });
+
+  const logoutMutation = useMutation({
+    mutationFn: () => api.post<void>("/auth/logout"),
+    onSuccess: () => {
+      // Drop every cached query that belongs to the previous user.
+      // setQueryData(me, null) would also work but `removeQueries`
+      // forces a fresh /me on next mount, which matches the intent.
+      queryClient.removeQueries({ queryKey: qk.me });
+      queryClient.removeQueries({ queryKey: qk.todos });
+      queryClient.removeQueries({ queryKey: qk.notifications });
+    },
+  });
+
+  const value = useMemo<AuthState>(
+    () => ({
+      user,
+      loading,
+      login: async (email, password) => {
+        await loginMutation.mutateAsync({ email, password });
+      },
+      register: async (email, password) => {
+        await registerMutation.mutateAsync({ email, password });
+      },
+      logout: async () => {
+        await logoutMutation.mutateAsync();
+      },
+    }),
+    [user, loading, loginMutation, registerMutation, logoutMutation],
+  );
+
+  return <AuthCtx.Provider value={value}>{children}</AuthCtx.Provider>;
 }
 
 export function useAuth(): AuthState {

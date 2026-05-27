@@ -1,65 +1,85 @@
 import { useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, type Todo } from "../api";
+import { qk } from "../queryClient";
 
-type Props = {
-  todo: Todo;
-  onChanged: (t: Todo) => void;
-  onDeleted: (id: string) => void;
+type UpdateBody = {
+  title?: string;
+  due_at?: string;
+  clear_due_at?: boolean;
 };
 
-export function TodoItem({ todo, onChanged, onDeleted }: Props) {
+export function TodoItem({ todo }: { todo: Todo }) {
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(todo.title);
   const [dueAt, setDueAt] = useState(toLocalInput(todo.due_at));
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const queryClient = useQueryClient();
 
-  async function toggleComplete() {
-    // optimistic flip
-    const next = { ...todo, completed: !todo.completed };
-    onChanged(next);
-    try {
-      const updated = await api.patch<Todo>(`/todos/${todo.id}`, { completed: next.completed });
-      onChanged(updated);
-    } catch (err) {
-      // roll back
-      onChanged(todo);
-      setError(err instanceof ApiError ? err.message : "update failed");
-    }
-  }
+  // Optimistic toggle: write the cache immediately, roll back on error,
+  // re-fetch on settle so the server's truth wins regardless. This is the
+  // canonical React Query pattern for "instant feedback on a network
+  // round-trip" — onMutate fires synchronously before the request leaves.
+  const toggleComplete = useMutation({
+    mutationFn: (completed: boolean) =>
+      api.patch<Todo>(`/todos/${todo.id}`, { completed }),
+    onMutate: async (completed) => {
+      await queryClient.cancelQueries({ queryKey: qk.todos });
+      const previous = queryClient.getQueryData<Todo[]>(qk.todos);
+      queryClient.setQueryData<Todo[]>(qk.todos, (old) =>
+        (old ?? []).map((t) => (t.id === todo.id ? { ...t, completed } : t)),
+      );
+      return { previous };
+    },
+    onError: (_err, _completed, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(qk.todos, context.previous);
+      }
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: qk.todos });
+    },
+  });
 
-  async function saveEdit() {
-    setBusy(true);
-    setError(null);
-    try {
-      const body: Record<string, unknown> = { title: title.trim() };
-      if (dueAt) body.due_at = new Date(dueAt).toISOString();
-      else body.clear_due_at = true;
-      const updated = await api.patch<Todo>(`/todos/${todo.id}`, body);
-      onChanged(updated);
+  const saveEdit = useMutation({
+    mutationFn: (body: UpdateBody) => api.patch<Todo>(`/todos/${todo.id}`, body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: qk.todos });
       setEditing(false);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "save failed");
-    } finally {
-      setBusy(false);
-    }
+    },
+  });
+
+  const remove = useMutation({
+    mutationFn: () => api.del<void>(`/todos/${todo.id}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: qk.todos });
+    },
+  });
+
+  function handleSaveEdit() {
+    const body: UpdateBody = { title: title.trim() };
+    if (dueAt) body.due_at = new Date(dueAt).toISOString();
+    else body.clear_due_at = true;
+    saveEdit.mutate(body);
   }
 
-  async function remove() {
+  function handleRemove() {
     if (!confirm(`Delete "${todo.title}"?`)) return;
-    setBusy(true);
-    try {
-      await api.del(`/todos/${todo.id}`);
-      onDeleted(todo.id);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "delete failed");
-      setBusy(false);
-    }
+    remove.mutate();
   }
+
+  const busy = toggleComplete.isPending || saveEdit.isPending || remove.isPending;
+  const error =
+    toggleComplete.error ?? saveEdit.error ?? remove.error ?? null;
+  const errorMsg = error instanceof ApiError ? error.message : error ? "update failed" : null;
 
   return (
     <li style={{ ...styles.row, opacity: todo.completed ? 0.55 : 1 }}>
-      <input type="checkbox" checked={todo.completed} onChange={toggleComplete} aria-label="complete" />
+      <input
+        type="checkbox"
+        checked={todo.completed}
+        onChange={(e) => toggleComplete.mutate(e.target.checked)}
+        aria-label="complete"
+      />
       {editing ? (
         <div style={styles.editArea}>
           <input value={title} onChange={(e) => setTitle(e.target.value)} style={styles.input} />
@@ -69,12 +89,14 @@ export function TodoItem({ todo, onChanged, onDeleted }: Props) {
             onChange={(e) => setDueAt(e.target.value)}
             style={styles.input}
           />
-          <button onClick={saveEdit} disabled={busy}>Save</button>
-          <button onClick={() => setEditing(false)} disabled={busy}>Cancel</button>
+          <button onClick={handleSaveEdit} disabled={saveEdit.isPending}>Save</button>
+          <button onClick={() => setEditing(false)} disabled={saveEdit.isPending}>Cancel</button>
         </div>
       ) : (
         <div style={styles.viewArea}>
-          <div style={{ textDecoration: todo.completed ? "line-through" : "none" }}>{todo.title}</div>
+          <div style={{ textDecoration: todo.completed ? "line-through" : "none" }}>
+            {todo.title}
+          </div>
           {todo.due_at && (
             <div style={{ fontSize: 12, color: "#666" }}>due {formatDue(todo.due_at)}</div>
           )}
@@ -83,10 +105,10 @@ export function TodoItem({ todo, onChanged, onDeleted }: Props) {
       {!editing && (
         <div style={{ display: "flex", gap: 6 }}>
           <button onClick={() => setEditing(true)} disabled={busy}>Edit</button>
-          <button onClick={remove} disabled={busy}>Delete</button>
+          <button onClick={handleRemove} disabled={busy}>Delete</button>
         </div>
       )}
-      {error && <div style={{ color: "#c00", width: "100%" }}>{error}</div>}
+      {errorMsg && <div style={{ color: "#c00", width: "100%" }}>{errorMsg}</div>}
     </li>
   );
 }

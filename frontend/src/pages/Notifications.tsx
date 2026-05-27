@@ -1,48 +1,27 @@
-import { useEffect, useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, type Notification } from "../api";
+import { qk } from "../queryClient";
+import { useNotifications } from "../hooks/useNotifications";
 
-export function Notifications({ onCountChange }: { onCountChange: (n: number) => void }) {
-  const [items, setItems] = useState<Notification[]>([]);
-  const [error, setError] = useState<string | null>(null);
+export function Notifications() {
+  const queryClient = useQueryClient();
+  const { data: items = [], error } = useNotifications();
 
-  useEffect(() => {
-    let alive = true;
-    async function load() {
-      try {
-        const rows = await api.get<Notification[]>("/notifications");
-        if (!alive) return;
-        setItems(rows);
-        onCountChange(rows.filter((r) => !r.read_at).length);
-      } catch (e) {
-        if (!alive) return;
-        setError(e instanceof ApiError ? e.message : "load failed");
-      }
-    }
-    load();
-    const id = setInterval(load, 30_000);
-    return () => {
-      alive = false;
-      clearInterval(id);
-    };
-  }, [onCountChange]);
+  const markRead = useMutation({
+    mutationFn: (id: string) =>
+      api.post<Notification>(`/notifications/${id}/mark-read`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: qk.notifications });
+    },
+  });
 
-  async function markRead(id: string) {
-    try {
-      const updated = await api.post<Notification>(`/notifications/${id}/mark-read`);
-      setItems((prev) => {
-        const next = prev.map((x) => (x.id === id ? updated : x));
-        onCountChange(next.filter((r) => !r.read_at).length);
-        return next;
-      });
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : "update failed");
-    }
-  }
+  const errorMsg =
+    error instanceof ApiError ? error.message : error ? "load failed" : null;
 
   return (
     <section>
       <h2>Notifications</h2>
-      {error && <p style={{ color: "#c00" }}>{error}</p>}
+      {errorMsg && <p style={{ color: "#c00" }}>{errorMsg}</p>}
       {items.length === 0 ? (
         <p style={{ color: "#666" }}>None yet.</p>
       ) : (
@@ -62,9 +41,15 @@ export function Notifications({ onCountChange }: { onCountChange: (n: number) =>
             >
               <div>
                 <div>{n.message}</div>
-                <div style={{ fontSize: 12, color: "#666" }}>{new Date(n.created_at).toLocaleString()}</div>
+                <div style={{ fontSize: 12, color: "#666" }}>
+                  {new Date(n.created_at).toLocaleString()}
+                </div>
               </div>
-              {!n.read_at && <button onClick={() => markRead(n.id)}>Mark read</button>}
+              {!n.read_at && (
+                <button onClick={() => markRead.mutate(n.id)} disabled={markRead.isPending}>
+                  Mark read
+                </button>
+              )}
             </li>
           ))}
         </ul>

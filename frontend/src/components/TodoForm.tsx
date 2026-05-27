@@ -1,34 +1,45 @@
 import { useState, type FormEvent } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, type Todo } from "../api";
+import { qk } from "../queryClient";
 
-export function TodoForm({ onCreated }: { onCreated: (t: Todo) => void }) {
+type CreateInput = { title: string; due_at: string | null };
+
+export function TodoForm() {
   const [title, setTitle] = useState("");
   const [dueAt, setDueAt] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const queryClient = useQueryClient();
 
-  async function onSubmit(e: FormEvent) {
-    e.preventDefault();
-    if (!title.trim()) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const created = await api.post<Todo>("/todos", {
-        title: title.trim(),
-        due_at: dueAt ? new Date(dueAt).toISOString() : null,
-      });
-      onCreated(created);
+  const createTodo = useMutation({
+    mutationFn: (body: CreateInput) => api.post<Todo>("/todos", body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: qk.todos });
       setTitle("");
       setDueAt("");
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "create failed");
-    } finally {
-      setBusy(false);
-    }
+    },
+  });
+
+  function onSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (!title.trim()) return;
+    createTodo.mutate({
+      title: title.trim(),
+      due_at: dueAt ? new Date(dueAt).toISOString() : null,
+    });
   }
 
+  const errorMsg =
+    createTodo.error instanceof ApiError
+      ? createTodo.error.message
+      : createTodo.error
+        ? "create failed"
+        : null;
+
   return (
-    <form onSubmit={onSubmit} style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+    <form
+      onSubmit={onSubmit}
+      style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}
+    >
       <label style={{ display: "flex", flexDirection: "column", flex: "1 1 200px" }}>
         <span style={{ fontSize: 12, color: "#666" }}>Title</span>
         <input
@@ -48,10 +59,10 @@ export function TodoForm({ onCreated }: { onCreated: (t: Todo) => void }) {
           style={{ padding: 8, fontSize: 15 }}
         />
       </label>
-      <button type="submit" disabled={busy} style={{ padding: "8px 14px", fontSize: 15 }}>
-        {busy ? "..." : "Add"}
+      <button type="submit" disabled={createTodo.isPending} style={{ padding: "8px 14px", fontSize: 15 }}>
+        {createTodo.isPending ? "..." : "Add"}
       </button>
-      {error && <div style={{ color: "#c00", width: "100%" }}>{error}</div>}
+      {errorMsg && <div style={{ color: "#c00", width: "100%" }}>{errorMsg}</div>}
     </form>
   );
 }

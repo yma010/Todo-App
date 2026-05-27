@@ -7,7 +7,7 @@ A small but production-minded full-stack todo app:
 - **Backend:** FastAPI (Python 3.12) + SQLAlchemy 2 + Alembic
 - **Database:** PostgreSQL 16 (Docker)
 - **Background jobs:** APScheduler with a Postgres-backed job store (`SQLAlchemyJobStore`)
-- **Frontend:** React 18 + Vite + TypeScript
+- **Frontend:** React 18 + Vite + TypeScript + TanStack Query
 - **Auth:** server-side sessions in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie
 
 See [`docs/Interview_exercise.md`](docs/Interview_exercise.md) for the
@@ -95,7 +95,9 @@ backend/
 frontend/
   src/
     api.ts             fetch wrapper (credentials: include)
+    queryClient.ts     TanStack Query client + shared query-key registry
     auth/AuthContext.tsx
+    hooks/useNotifications.ts  shared query for header badge + page
     pages/{Login,Todos,Notifications}.tsx
     components/{TodoForm,TodoItem}.tsx
 docker-compose.yml     Postgres only
@@ -162,6 +164,33 @@ Every read and write filters by `user_id = <current_user>`. Single-row
 lookups that don't match return **404, not 403** — this avoids leaking
 the existence of other users' rows by id-guessing. The pattern is
 centralized in `_get_owned_or_404` in `backend/app/routers/todos.py`.
+
+### Frontend data layer: TanStack Query
+
+All client-side fetching goes through TanStack Query (`react-query`).
+Concrete wins for this app:
+
+- **One cache, many consumers.** The header's unread badge and the
+  Notifications page subscribe to the same `["notifications"]` query
+  key, so they share a single 30-second poll — no prop callbacks, no
+  duplicate requests.
+- **Optimistic complete-toggle, the right way.** `TodoItem`'s
+  `useMutation` flips the cached row in `onMutate`, rolls back in
+  `onError`, and re-invalidates in `onSettled`. The UI feels instant
+  and the server is still the source of truth.
+- **Auth cache invalidation on logout.** The logout mutation calls
+  `queryClient.removeQueries` for `me`, `todos`, and `notifications`,
+  so the next render doesn't briefly flash the previous user's data.
+- **Sensible retries by default.** The shared `QueryClient` refuses to
+  retry 4xx responses — 401/422/409 won't be fixed by trying again, and
+  retrying them just costs latency. 5xx/network errors still get one
+  retry.
+- **Query keys in one file.** `frontend/src/queryClient.ts` exports a
+  `qk` registry so a typo on either side of the query/invalidate pair
+  becomes a TS error, not a silent miss.
+- **DevTools in dev only.** `<ReactQueryDevtools>` is mounted under
+  `import.meta.env.DEV` so it's interactive in dev but doesn't ship to
+  the production bundle.
 
 ### Validation
 
